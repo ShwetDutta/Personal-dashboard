@@ -1,20 +1,100 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { useHabits } from '../hooks/useHabits';
-import { useAnalytics } from '../hooks/useAnalytics';
+import { useAuth } from '../hooks/useAuth';
 import GlassCard from '../components/ui/GlassCard';
 import HabitForm from '../components/habits/HabitForm';
 import HabitHeatmap from '../components/habits/HabitHeatmap';
 import { Repeat, Plus, Check, Minus, Clock, Flame, Trophy, TrendingUp, Trash2, ChevronLeft, ChevronRight } from 'lucide-react';
 import { clsx } from 'clsx';
 import { format, subDays, eachDayOfInterval, isSameDay } from 'date-fns';
+import { supabase } from '../lib/supabase';
 
 export default function HabitsPage() {
+  const { user } = useAuth();
   const today = format(new Date(), 'yyyy-MM-dd');
   const { habits, entries, loading, addHabit, logHabit, deleteHabit, selectedDate, setSelectedDate } = useHabits(today);
-  const { dailyHabits, refetch: refetchAnalytics } = useAnalytics();
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [heatmapData, setHeatmapData] = useState<Record<string, number>>({});
+  const [completedToday, setCompletedToday] = useState(0);
+  const [totalHabitsCount, setTotalHabitsCount] = useState(0);
+
+  const fetchHeatmapData = async () => {
+    if (!user) return;
+
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+    const oneYearAgoStr = oneYearAgo.toISOString().split('T')[0];
+
+    // Get total number of habits (denominator for completion rate)
+    const { count: totalTasks } = await supabase
+      .from('habits')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', user.id);
+
+    // Get all habit entries for the last year
+    const { data: entries, error } = await supabase
+      .from('habit_entries')
+      .select('entry_date, completed, habit_id')
+      .eq('user_id', user.id)
+      .gte('entry_date', oneYearAgoStr);
+
+    if (error) {
+      console.error('Failed to fetch habit entries:', error);
+      return;
+    }
+
+    // Group by date: count how many habits were completed per day
+    const completionByDate: Record<string, { completed: number; total: number }> = {};
+
+    (entries as any[])?.forEach(entry => {
+      if (!completionByDate[entry.entry_date]) {
+        completionByDate[entry.entry_date] = { completed: 0, total: totalTasks ?? 1 };
+      }
+      if (entry.completed) {
+        completionByDate[entry.entry_date].completed += 1;
+      }
+    });
+
+    // Convert to rate: 0.0 to 1.0
+    const rateByDate: Record<string, number> = {};
+    Object.entries(completionByDate).forEach(([date, { completed, total }]) => {
+      rateByDate[date] = total > 0 ? completed / total : 0;
+    });
+
+    setHeatmapData(rateByDate);
+  };
+
+  const fetchTodayHabitStats = async () => {
+    if (!user) return;
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    const [habitsRes, entriesRes] = await Promise.all([
+      supabase
+        .from('habits')
+        .select('id')
+        .eq('user_id', user.id),
+      supabase
+        .from('habit_entries')
+        .select('id, completed')
+        .eq('user_id', user.id)
+        .eq('entry_date', todayStr),
+    ]);
+
+    const totalHabits = habitsRes.data?.length ?? 0;
+    const completed = entriesRes.data?.filter(e => e.completed).length ?? 0;
+
+    setTotalHabitsCount(totalHabits);
+    setCompletedToday(completed);
+  };
+
+  useEffect(() => {
+    if (user) {
+      fetchHeatmapData();
+      fetchTodayHabitStats();
+    }
+  }, [user]);
 
   const last7Days = eachDayOfInterval({ 
     start: subDays(new Date(), 6), 
@@ -24,7 +104,8 @@ export default function HabitsPage() {
   const handleLog = async (id: string, value: any) => {
     try {
       await logHabit(id, value, selectedDate);
-      refetchAnalytics();
+      fetchHeatmapData();
+      fetchTodayHabitStats();
     } catch (err) {
       console.error('Logging failed:', err);
     }
@@ -33,7 +114,8 @@ export default function HabitsPage() {
   const handleDelete = async (id: string) => {
     if (confirmDeleteId === id) {
       await deleteHabit(id);
-      refetchAnalytics();
+      fetchHeatmapData();
+      fetchTodayHabitStats();
       setConfirmDeleteId(null);
     } else {
       setConfirmDeleteId(id);
@@ -242,7 +324,7 @@ export default function HabitsPage() {
         )}
       </div>
 
-      <HabitHeatmap data={dailyHabits} />
+      <HabitHeatmap data={heatmapData} />
 
       {isFormOpen && (
         <HabitForm

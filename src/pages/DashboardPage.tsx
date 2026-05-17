@@ -41,68 +41,98 @@ export default function DashboardPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { tasks, toggleTaskComplete } = useTasks();
-  const { habits, logHabit, entries } = useHabits();
-  const { goals, updateGoal } = useGoals();
-  const { sessions } = useFocus();
   
   const [focusData, setFocusData] = useState<any[]>([]);
+  const [totalDoneCount, setTotalDoneCount] = useState(0);
+  const [doneThisWeek, setDoneThisWeek] = useState(0);
+  const [inProgressCount, setInProgressCount] = useState(0);
+  const [habitConsistencyPercent, setHabitConsistencyPercent] = useState(0);
+  const [recentActivities, setRecentActivities] = useState<any[]>([]);
 
   useEffect(() => {
     if (!user) return;
-    const fetchFocus = async () => {
-      const sevenDaysAgo = subDays(new Date(), 6).toISOString();
-      const { data } = await supabase
+
+    const fetchStats = async () => {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      const sevenDaysAgo = subDays(new Date(), 6);
+      sevenDaysAgo.setHours(0, 0, 0, 0);
+
+      // Focus data for chart
+      const { data: focusSessions } = await supabase
         .from('focus_sessions')
         .select('duration_minutes, created_at')
         .eq('user_id', user.id)
-        .gte('created_at', sevenDaysAgo);
+        .gte('created_at', sevenDaysAgo.toISOString());
       
       const days = eachDayOfInterval({
         start: subDays(new Date(), 6),
         end: new Date()
       });
 
-      const grouped = days.map(d => {
+      const groupedFocus = days.map(d => {
         const dateStr = format(d, 'yyyy-MM-dd');
-        const mins = data?.filter(s => format(new Date(s.created_at), 'yyyy-MM-dd') === dateStr)
+        const mins = focusSessions?.filter(s => s.created_at.startsWith(dateStr))
           .reduce((sum, s) => sum + (s.duration_minutes || 0), 0) || 0;
         return { name: format(d, 'EEE').charAt(0), value: parseFloat((mins / 60).toFixed(1)) };
       });
-      setFocusData(grouped);
+      setFocusData(groupedFocus);
+
+      // Tasks stats
+      const [totalTasksRes, weekTasksRes, inProgressRes] = await Promise.all([
+        supabase.from('tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('status', 'completed'),
+        supabase.from('tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('status', 'completed').gte('completed_at', subDays(new Date(), 7).toISOString()),
+        supabase.from('tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).neq('status', 'completed').is('archived', false)
+      ]);
+
+      setTotalDoneCount(totalTasksRes.count || 0);
+      setDoneThisWeek(weekTasksRes.count || 0);
+      setInProgressCount(inProgressRes.count || 0);
+
+      // Habit consistency
+      const [habitsRes, todayEntriesRes] = await Promise.all([
+        supabase.from('habits').select('id', { count: 'exact', head: true }).eq('user_id', user.id),
+        supabase.from('habit_entries').select('id').eq('user_id', user.id).eq('entry_date', todayStr).eq('completed', true)
+      ]);
+      
+      const totalHabits = habitsRes.count || 0;
+      const completedToday = todayEntriesRes.data?.length || 0;
+      setHabitConsistencyPercent(totalHabits > 0 ? Math.round((completedToday / totalHabits) * 100) : 0);
+
+      // Recent Activity
+      const [recentTasks, recentFocus] = await Promise.all([
+        supabase.from('tasks').select('id, title, completed_at').eq('user_id', user.id).eq('status', 'completed').gte('completed_at', todayStart.toISOString()).order('completed_at', { ascending: false }).limit(4),
+        supabase.from('focus_sessions').select('id, duration_minutes, created_at').eq('user_id', user.id).gte('created_at', todayStart.toISOString()).order('created_at', { ascending: false }).limit(4)
+      ]);
+
+      const activities = [
+        ...(recentTasks.data || []).map(t => ({
+          id: t.id,
+          title: t.title,
+          type: 'task',
+          time: t.completed_at,
+          icon: CheckCircle2,
+          color: 'text-emerald-500'
+        })),
+        ...(recentFocus.data || []).map(s => ({
+          id: s.id,
+          title: `Focused for ${s.duration_minutes}m`,
+          type: 'focus',
+          time: s.created_at,
+          icon: Zap,
+          color: 'text-indigo-500'
+        }))
+      ].sort((a, b) => new Date(b.time || '').getTime() - new Date(a.time || '').getTime()).slice(0, 4);
+      
+      setRecentActivities(activities);
     };
-    fetchFocus();
+
+    fetchStats();
   }, [user]);
 
-  const totalTasksCompleted = tasks.filter(t => t.completed).length;
-  const tasksCompletedThisWeek = tasks.filter(t => {
-    if (!t.completed_at) return false;
-    return new Date(t.completed_at) > subDays(new Date(), 7);
-  }).length;
+  const { goals } = useGoals();
   const inProgressTasks = tasks.filter(t => !t.completed && !t.archived);
-
-  const habitConsistency = habits.length > 0
-    ? Math.round((entries.filter(e => e.completed).length / Math.max(1, habits.length)) * 100)
-    : 0;
-
-  const todayStr = format(new Date(), 'yyyy-MM-dd');
-  const recentActivity = [
-    ...tasks.filter(t => t.completed_at?.startsWith(todayStr)).map(t => ({ 
-      id: t.id, 
-      title: t.title, 
-      type: 'task', 
-      time: t.completed_at,
-      icon: CheckCircle2,
-      color: 'text-emerald-500'
-    })),
-    ...sessions.filter(s => s.created_at.startsWith(todayStr)).map(s => ({
-      id: s.id,
-      title: `Focused for ${s.duration_minutes}m`,
-      type: 'focus',
-      time: s.created_at,
-      icon: Zap,
-      color: 'text-indigo-500'
-    }))
-  ].sort((a, b) => new Date(b.time || '').getTime() - new Date(a.time || '').getTime()).slice(0, 4);
 
   return (
     <motion.div
@@ -119,17 +149,17 @@ export default function DashboardPage() {
               <div>
                 <p className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mb-2">Overall Summary</p>
                 <div className="flex items-baseline gap-3">
-                  <h3 className="text-6xl font-black text-slate-900 tracking-tighter">{totalTasksCompleted}</h3>
+                  <h3 className="text-6xl font-black text-slate-900 tracking-tighter">{totalDoneCount}</h3>
                   <span className="text-sm font-bold text-slate-400 uppercase tracking-widest">Total Done</span>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4 pt-8 border-t border-slate-900/5">
                 <div>
-                  <p className="text-2xl font-black text-slate-900 tracking-tight">{inProgressTasks.length}</p>
+                  <p className="text-2xl font-black text-slate-900 tracking-tight">{inProgressCount}</p>
                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">In Progress</p>
                 </div>
                 <div>
-                  <p className="text-2xl font-black text-slate-900 tracking-tight">{tasksCompletedThisWeek}</p>
+                  <p className="text-2xl font-black text-slate-900 tracking-tight">{doneThisWeek}</p>
                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Done This Week</p>
                 </div>
               </div>
@@ -165,12 +195,12 @@ export default function DashboardPage() {
             <p className="text-[11px] font-black text-slate-400 uppercase tracking-[0.2em] mb-6 w-full text-left">Habit Consistency</p>
             <div className="relative w-32 h-32">
                <ResponsiveContainer width="100%" height="100%">
-                  <RadialBarChart innerRadius="80%" outerRadius="100%" data={[{ value: habitConsistency }]} startAngle={90} endAngle={-270}>
+                  <RadialBarChart innerRadius="80%" outerRadius="100%" data={[{ value: habitConsistencyPercent }]} startAngle={90} endAngle={-270}>
                     <RadialBar background dataKey="value" cornerRadius={10} fill="#6366f1" />
                   </RadialBarChart>
                </ResponsiveContainer>
                <div className="absolute inset-0 flex flex-col items-center justify-center">
-                  <span className="text-2xl font-black text-slate-900">{habitConsistency}%</span>
+                  <span className="text-2xl font-black text-slate-900">{habitConsistencyPercent}%</span>
                </div>
             </div>
           </GlassCard>
@@ -269,12 +299,12 @@ export default function DashboardPage() {
         <GlassCard className="p-8">
           <h3 className="text-sm font-black text-slate-900 uppercase tracking-[0.2em] mb-8">Recent Activity</h3>
           <div className="space-y-1">
-            {recentActivity.map((activity, i) => (
+            {recentActivities.map((activity, i) => (
               <div 
                 key={activity.id} 
                 className={clsx(
                   "flex items-center justify-between py-4",
-                  i !== recentActivity.length - 1 && "border-b border-slate-100"
+                  i !== recentActivities.length - 1 && "border-b border-slate-100"
                 )}
               >
                 <div className="flex items-center gap-4">
@@ -291,7 +321,7 @@ export default function DashboardPage() {
                 </span>
               </div>
             ))}
-            {recentActivity.length === 0 && (
+            {recentActivities.length === 0 && (
               <div className="py-10 text-center opacity-30">
                 <Activity size={32} className="mx-auto mb-4" />
                 <p className="text-[11px] font-black uppercase tracking-widest">Stationary Period Detected</p>

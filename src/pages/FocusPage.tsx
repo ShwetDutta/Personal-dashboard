@@ -2,23 +2,95 @@ import React from 'react';
 import PomodoroWidget from '../components/dashboard/PomodoroWidget';
 import GlassCard from '../components/ui/GlassCard';
 import { useFocus } from '../hooks/useFocus';
-import { History, TrendingUp, Zap, Clock, Settings } from 'lucide-react';
-import { format, isSameDay } from 'date-fns';
+import { History, TrendingUp, Zap, Clock, Settings, Activity } from 'lucide-react';
+import { format, isSameDay, startOfDay, endOfDay } from 'date-fns';
 import { AreaChart, Area, XAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { motion } from 'motion/react';
 import { clsx } from 'clsx';
+import { supabase } from '../lib/supabase';
+import { useAuth } from '../hooks/useAuth';
 
 export default function FocusPage() {
-  const { sessions, loading } = useFocus();
+  const { user } = useAuth();
+  const { sessions, loading, refetchFocus } = useFocus();
+  const [focusedToday, setFocusedToday] = React.useState(0);
+  const [sessionsToday, setSessionsToday] = React.useState(0);
+  const [avgSession, setAvgSession] = React.useState(0);
+  const [trendsData, setTrendsData] = React.useState<any[]>([]);
 
-  const today = new Date().toDateString();
-  const todaySessions = sessions.filter(s => new Date(s.created_at).toDateString() === today);
-  
-  const totalFocusToday = todaySessions.reduce((acc, s) => acc + (s.duration_minutes || 0), 0);
-  const sessionCountToday = todaySessions.length;
-  const avgSessionToday = sessionCountToday > 0 ? Math.round(totalFocusToday / sessionCountToday) : 0;
+  const fetchTodayStats = async () => {
+    if (!user) return;
+
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date();
+    todayEnd.setHours(23, 59, 59, 999);
+
+    const { data: sessions = [], error } = await supabase
+      .from('focus_sessions')
+      .select('id, duration_minutes, started_at, ended_at')
+      .eq('user_id', user.id)
+      .gte('created_at', todayStart.toISOString())
+      .lte('created_at', todayEnd.toISOString());
+
+    if (error) {
+      console.error('Failed to fetch focus stats:', error);
+      return;
+    }
+
+    const totalMinutes = (sessions as any[])?.reduce((sum, s) => sum + (s.duration_minutes ?? 0), 0) ?? 0;
+    const sessionCount = (sessions as any[])?.length ?? 0;
+    const avgMinutes = sessionCount > 0 ? Math.round(totalMinutes / sessionCount) : 0;
+
+    setFocusedToday(totalMinutes);
+    setSessionsToday(sessionCount);
+    setAvgSession(avgMinutes);
+  };
+
+  const fetchTrends = async () => {
+    if (!user) return;
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+
+    const { data: sessions = [] } = await supabase
+      .from('focus_sessions')
+      .select('duration_minutes, created_at')
+      .eq('user_id', user.id)
+      .gte('created_at', sevenDaysAgo.toISOString())
+      .order('created_at', { ascending: true });
+
+    // Group by date
+    const byDate: Record<string, number> = {};
+    (sessions as any[])?.forEach(s => {
+      const date = s.created_at.split('T')[0];
+      byDate[date] = (byDate[date] ?? 0) + s.duration_minutes;
+    });
+
+    // Build last 7 days array (fill missing dates with 0)
+    const chartData = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (6 - i));
+      const dateStr = d.toISOString().split('T')[0];
+      const dayLabel = d.toLocaleDateString('en-US', { weekday: 'short' });
+      return {
+        day: dayLabel,
+        minutes: byDate[dateStr] ?? 0,
+        hours: parseFloat(((byDate[dateStr] ?? 0) / 60).toFixed(1)),
+      };
+    });
+
+    setTrendsData(chartData);
+  };
+
+  React.useEffect(() => {
+    if (user) {
+      fetchTodayStats();
+      fetchTrends();
+    }
+  }, [user]);
 
   const formatDuration = (mins: number) => {
+    if (mins === 0) return '0 min';
     if (mins < 60) return `${mins} min`;
     const h = Math.floor(mins / 60);
     const m = mins % 60;
@@ -41,17 +113,17 @@ export default function FocusPage() {
         <div className="lg:col-span-5 xl:col-span-4 h-fit lg:sticky lg:top-10">
           <div className="space-y-6 mb-8">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-               <GlassCard className="p-6 rounded-2xl border-white/80 transition-all hover:bg-white group text-center">
+                <GlassCard className="p-6 rounded-2xl border-white/80 transition-all hover:bg-white group text-center">
                   <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-2">Focused Today</p>
-                  <h4 className="text-2xl font-black text-slate-900">{formatDuration(totalFocusToday)}</h4>
+                  <h4 className="text-2xl font-black text-slate-900">{formatDuration(focusedToday)}</h4>
                </GlassCard>
                <GlassCard className="p-6 rounded-2xl border-white/80 transition-all hover:bg-white group text-center">
                   <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-2">Sessions Today</p>
-                  <h4 className="text-2xl font-black text-slate-900">{sessionCountToday}</h4>
+                  <h4 className="text-2xl font-black text-slate-900">{sessionsToday}</h4>
                </GlassCard>
                <GlassCard className="p-6 rounded-2xl border-white/80 transition-all hover:bg-white group text-center">
                   <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-2">Avg Session</p>
-                  <h4 className="text-2xl font-black text-slate-900">{avgSessionToday > 0 ? `${avgSessionToday}m` : "—"}</h4>
+                  <h4 className="text-2xl font-black text-slate-900">{avgSession > 0 ? `${avgSession}m` : "—"}</h4>
                </GlassCard>
             </div>
           </div>
@@ -72,7 +144,7 @@ export default function FocusPage() {
             </div>
             <div className="h-[280px]">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={sessions.slice(0, 15).reverse()}>
+                <AreaChart data={trendsData}>
                   <defs>
                     <linearGradient id="focusGradDesign" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#6366f1" stopOpacity={0.15}/>
@@ -80,11 +152,10 @@ export default function FocusPage() {
                     </linearGradient>
                   </defs>
                   <XAxis 
-                    dataKey="created_at" 
+                    dataKey="day" 
                     axisLine={false} 
                     tickLine={false} 
                     tick={{fontSize: 9, fill: '#94a3b8', fontWeight: 700}}
-                    tickFormatter={(val) => format(new Date(val), 'MMM d')}
                     dy={10}
                   />
                   <Tooltip 
@@ -97,7 +168,7 @@ export default function FocusPage() {
                     labelStyle={{fontSize: '11px', fontWeight: 'bold', color: '#64748b', marginBottom: '4px'}}
                     itemStyle={{color: '#6366f1', fontWeight: 'bold', fontSize: '13px'}}
                   />
-                  <Area type="monotone" dataKey="duration_minutes" stroke="#6366f1" strokeWidth={4} fill="url(#focusGradDesign)" />
+                  <Area type="monotone" dataKey="hours" stroke="#6366f1" strokeWidth={4} fill="url(#focusGradDesign)" />
                 </AreaChart>
               </ResponsiveContainer>
             </div>

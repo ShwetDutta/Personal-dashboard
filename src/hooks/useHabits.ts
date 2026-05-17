@@ -91,6 +91,7 @@ export const useHabits = (initialDate = format(new Date(), 'yyyy-MM-dd')) => {
 
     try {
       await ensureProfile(user);
+      console.log('[Habit] Logging entry:', { habitId, date: logDate, value });
 
       const payload: any = {
         habit_id: habitId,
@@ -103,6 +104,8 @@ export const useHabits = (initialDate = format(new Date(), 'yyyy-MM-dd')) => {
         .from('habit_entries')
         .upsert(payload, { onConflict: 'habit_id,entry_date' })
         .select();
+      
+      console.log('[Habit] Upsert result:', data, error);
       
       if (error) throw error;
       

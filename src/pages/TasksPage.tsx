@@ -1,17 +1,28 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useTasks } from '../hooks/useTasks';
 import { useAnalytics } from '../hooks/useAnalytics';
 import GlassCard from '../components/ui/GlassCard';
 import LoadingSkeleton from '../components/ui/LoadingSkeleton';
 import TaskForm from '../components/tasks/TaskForm';
-import { CheckSquare, Plus, Calendar, ChevronDown, ChevronUp, Trash2, Edit2, ChevronLeft, ChevronRight } from 'lucide-react';
+import { CheckSquare, Plus, Calendar, ChevronDown, ChevronUp, Trash2, Edit2, Activity } from 'lucide-react';
 import { clsx } from 'clsx';
 import { format, isToday, isPast, subDays, eachDayOfInterval, isSameDay } from 'date-fns';
 
 export default function TasksPage() {
-  const today = format(new Date(), 'yyyy-MM-dd');
-  const [selectedDate, setSelectedDate] = useState(today);
+  const generateDateRange = (): string[] => {
+    const dates: string[] = []
+    for (let i = -3; i <= 7; i++) {
+      const d = new Date()
+      d.setDate(d.getDate() + i)
+      dates.push(d.toISOString().split('T')[0])
+    }
+    return dates
+  }
+
+  const [dates] = useState<string[]>(generateDateRange)
+  const today = new Date().toISOString().split('T')[0]
+  const [selectedDate, setSelectedDate] = useState(today)
   const { tasks, loading, addTask, updateTask, toggleTaskComplete, deleteTask } = useTasks();
   const { refetch: refetchAnalytics } = useAnalytics();
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -19,10 +30,18 @@ export default function TasksPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  const last14Days = eachDayOfInterval({ 
-    start: subDays(new Date(), 13), 
-    end: new Date() 
-  });
+  const dateBarRef = useRef<HTMLDivElement>(null)
+  const todayRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (todayRef.current && dateBarRef.current) {
+      todayRef.current.scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest',
+        inline: 'center',
+      })
+    }
+  }, [])
 
   const handleToggle = async (id: string, completed: boolean) => {
     await toggleTaskComplete(id, completed);
@@ -75,32 +94,51 @@ export default function TasksPage() {
           <p className="text-slate-400 font-bold uppercase tracking-widest text-[10px] mt-2 ml-5">Track your goals • {tasks.filter(t => !t.completed).length} remaining</p>
         </div>
 
-        <div className="flex items-center gap-2 bg-white/40 p-1.5 rounded-2xl glass border-white/60 overflow-x-auto max-w-full md:max-w-md">
-          {last14Days.map((day) => {
-            const dateStr = format(day, 'yyyy-MM-dd');
-            const isSelected = selectedDate === dateStr;
-            const isTodayDay = dateStr === today;
+        <div 
+          ref={dateBarRef}
+          className="flex items-center gap-2 bg-white/40 p-1.5 rounded-2xl glass border-white/60 overflow-x-auto max-w-full md:max-w-md scrollbar-hide"
+        >
+          {dates.map((date) => {
+            const d = new Date(date)
+            const todayDate = new Date()
+            todayDate.setHours(0, 0, 0, 0)
+            const target = new Date(date)
+            target.setHours(0, 0, 0, 0)
+            const diffDays = Math.round((target.getTime() - todayDate.getTime()) / (1000 * 60 * 60 * 24))
+
+            const dayName = d.toLocaleDateString('en-US', { weekday: 'short' })
+            const dayNum = d.getDate().toString()
+
+            let dayLabel = dayName
+            if (diffDays === 0) dayLabel = 'Today'
+            if (diffDays === 1) dayLabel = 'Tomorrow'
+            if (diffDays === -1) dayLabel = 'Yesterday'
+
+            const isSelected = selectedDate === date;
+            const isTodayDay = date === today;
+            const isFuture = date > today;
             
             return (
               <button
-                key={dateStr}
-                onClick={() => setSelectedDate(dateStr)}
+                key={date}
+                ref={isTodayDay ? todayRef : undefined}
+                onClick={() => setSelectedDate(date)}
                 className={clsx(
                   'px-4 py-2 rounded-xl flex flex-col items-center min-w-[64px] transition-all duration-300',
                   isSelected 
                     ? 'bg-slate-900 text-white shadow-lg shadow-slate-200' 
-                    : 'text-slate-400 hover:bg-white hover:text-slate-600'
+                    : isFuture 
+                      ? 'text-indigo-500 hover:bg-white'
+                      : 'text-slate-400 hover:bg-white hover:text-slate-600',
+                  isTodayDay && !isSelected && 'ring-2 ring-indigo-500 ring-offset-2 ring-offset-transparent'
                 )}
               >
                 <span className="text-[9px] font-black uppercase tracking-widest mb-1">
-                  {format(day, 'EEE')}
+                  {dayLabel}
                 </span>
                 <span className="text-sm font-bold">
-                  {format(day, 'd')}
+                  {dayNum}
                 </span>
-                {isTodayDay && !isSelected && (
-                  <div className="w-1 h-1 bg-indigo-500 rounded-full mt-1" />
-                )}
               </button>
             );
           })}
@@ -120,7 +158,22 @@ export default function TasksPage() {
 
       <div className="flex items-center justify-between border-b border-slate-100 pb-6">
         <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest">
-          {format(new Date(selectedDate), 'EEEE, d MMMM')}
+          {(() => {
+            const d = new Date(selectedDate)
+            const todayDate = new Date()
+            todayDate.setHours(0, 0, 0, 0)
+            const target = new Date(selectedDate)
+            target.setHours(0, 0, 0, 0)
+            const diffDays = Math.round((target.getTime() - todayDate.getTime()) / (1000 * 60 * 60 * 24))
+            
+            const formattedDate = format(d, 'd MMMM')
+            let label = format(d, 'EEEE')
+            if (diffDays === 0) label = 'Today'
+            if (diffDays === 1) label = 'Tomorrow'
+            if (diffDays === -1) label = 'Yesterday'
+
+            return `${label}, ${formattedDate}`
+          })()}
           <span className="text-slate-300 mx-3">—</span>
           <span className="text-indigo-600">{filteredTasks.length} tasks</span>
           <span className="text-slate-300 mx-2">·</span>

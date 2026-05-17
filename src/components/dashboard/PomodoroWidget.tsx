@@ -3,6 +3,8 @@ import { Timer, Play, Pause, RotateCcw, Coffee, User, Settings } from 'lucide-re
 import { clsx } from 'clsx';
 import GlassCard from '../ui/GlassCard';
 import { useFocus } from '../../hooks/useFocus';
+import { useAuth } from '../../hooks/useAuth';
+import { supabase } from '../../lib/supabase';
 
 interface TimerState {
   startedAt: number;
@@ -16,7 +18,8 @@ export default function PomodoroWidget() {
   const [isActive, setIsActive] = useState(false);
   const [phase, setPhase] = useState<'work' | 'break'>('work');
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const { startFocusSession, endFocusSession, sessions = [] } = useFocus();
+  const { user } = useAuth();
+  const { startFocusSession, endFocusSession, refetchFocus } = useFocus();
 
   // Load / Sync with localStorage on mount
   useEffect(() => {
@@ -33,8 +36,8 @@ export default function PomodoroWidget() {
           setTimeLeft(remaining);
           setIsActive(true);
         } else {
-          // Timer finished while user was away
-          localStorage.removeItem('focus_timer');
+          // Timer finished while user was away - auto complete
+          handleComplete(state.sessionId, state.workSeconds, state.phase);
         }
       } catch (e) {
         console.error('Failed to resume focus timer', e);
@@ -54,32 +57,45 @@ export default function PomodoroWidget() {
           setTimeLeft(remaining);
           
           if (remaining === 0) {
+             console.log('[Focus] Timer reached zero, auto-completing');
              setIsActive(false);
-             handleComplete();
+             handleComplete(state.sessionId, state.workSeconds, state.phase);
           }
-        } else {
-          // If localStorage was cleared externally
-          setIsActive(false);
         }
       }, 1000);
-    } else if (timeLeft === 0 && isActive) {
-      setIsActive(false);
-      handleComplete();
     }
     return () => clearInterval(interval);
   }, [isActive, timeLeft]);
 
-  const handleComplete = async () => {
+  const handleComplete = async (sessionId: string | null, totalSeconds: number, currentPhase: 'work' | 'break') => {
     localStorage.removeItem('focus_timer');
+    const durationMinutes = Math.round(totalSeconds / 60);
+
+    console.log('[Focus] Completing session. Duration:', durationMinutes);
+
     try {
-      if (currentSessionId) {
-        await endFocusSession(currentSessionId, { productivity_score: 8 });
+      if (user && currentPhase === 'work' && durationMinutes >= 1) {
+        console.log('[Focus] User ID:', user?.id);
+        const { data, error } = await supabase.from('focus_sessions').insert({
+          user_id: user.id,
+          duration_minutes: durationMinutes,
+          title: 'Focus Session',
+          created_at: new Date().toISOString()
+        }).select();
+        
+        if (error) {
+          console.error('[Focus] Failed to save focus session:', error);
+        } else {
+          console.log('[Focus] Focus session saved:', data);
+        }
+        refetchFocus();
       }
     } catch (err) {
-      console.error('Failed to end focus session:', err);
+      console.error('Failed to save focus session:', err);
     } finally {
+      setIsActive(false);
       setCurrentSessionId(null);
-      const nextPhase = phase === 'work' ? 'break' : 'work';
+      const nextPhase = currentPhase === 'work' ? 'break' : 'work';
       setPhase(nextPhase);
       setTimeLeft(nextPhase === 'break' ? 5 * 60 : 25 * 60);
     }
@@ -87,32 +103,31 @@ export default function PomodoroWidget() {
 
   const toggleTimer = async () => {
     if (isActive) {
-      // Pause - just clear interval and persistence for now as requested "On timer STOP — clear localStorage"
-      // Actually the user might want a proper pause, but they said "On timer STOP (which could mean pause/stop) — clear"
-      // Let's follow the start/stop pattern perfectly.
-      setIsActive(false);
-      localStorage.removeItem('focus_timer');
+      // Pause - calculate what was done so far and save? 
+      // The user instructions say: "Only save if at least 1 minute was focused"
+      // Let's implement the stopTimer as a complete stop for now as per instructions.
+      
+      const saved = localStorage.getItem('focus_timer');
+      if (saved) {
+        const state: TimerState = JSON.parse(saved);
+        const elapsedSeconds = state.workSeconds - timeLeft;
+        if (elapsedSeconds >= 60 && phase === 'work') {
+          handleComplete(currentSessionId, elapsedSeconds, phase);
+        } else {
+          setIsActive(false);
+          localStorage.removeItem('focus_timer');
+        }
+      } else {
+        setIsActive(false);
+      }
     } else {
       const workMinutes = phase === 'break' ? 5 : 25;
-      let sessionId = currentSessionId;
       
-      if (!sessionId && phase === 'work') {
-        try {
-          const session = await startFocusSession({ title: 'Focus Session', duration_minutes: workMinutes });
-          if (session) {
-            sessionId = session.id;
-            setCurrentSessionId(sessionId);
-          }
-        } catch (e) {
-          console.error("Session start failed", e);
-        }
-      }
-
       const timerState: TimerState = {
         startedAt: Date.now(),
-        workSeconds: timeLeft, // Continue from where it was
+        workSeconds: timeLeft, 
         phase: phase,
-        sessionId: sessionId
+        sessionId: currentSessionId
       };
       
       localStorage.setItem('focus_timer', JSON.stringify(timerState));
