@@ -24,46 +24,27 @@ export default function HabitsPage() {
     if (!user) return;
 
     const oneYearAgo = new Date();
-    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+    oneYearAgo.setDate(oneYearAgo.getDate() - 364);
     const oneYearAgoStr = oneYearAgo.toISOString().split('T')[0];
 
-    // Get total number of habits (denominator for completion rate)
-    const { count: totalTasks } = await supabase
-      .from('habits')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', user.id);
-
-    // Get all habit entries for the last year
-    const { data: entries, error } = await supabase
-      .from('habit_entries')
-      .select('entry_date, completed, habit_id')
+    // Fetch precomputed consistency metrics from the habit_heatmap view
+    const { data, error } = await supabase
+      .from('habit_heatmap')
+      .select('entry_date, consistency_score')
       .eq('user_id', user.id)
       .gte('entry_date', oneYearAgoStr);
 
     if (error) {
-      console.error('Failed to fetch habit entries:', error);
+      console.error('Failed to fetch habit heatmap data:', error);
       return;
     }
 
-    // Group by date: count how many habits were completed per day
-    const completionByDate: Record<string, { completed: number; total: number }> = {};
-
-    (entries as any[])?.forEach(entry => {
-      if (!completionByDate[entry.entry_date]) {
-        completionByDate[entry.entry_date] = { completed: 0, total: totalTasks ?? 1 };
-      }
-      if (entry.completed) {
-        completionByDate[entry.entry_date].completed += 1;
-      }
+    const scoreByDate: Record<string, number> = {};
+    (data as any[])?.forEach(row => {
+      scoreByDate[row.entry_date] = Number(row.consistency_score) || 0;
     });
 
-    // Convert to rate: 0.0 to 1.0
-    const rateByDate: Record<string, number> = {};
-    Object.entries(completionByDate).forEach(([date, { completed, total }]) => {
-      rateByDate[date] = total > 0 ? completed / total : 0;
-    });
-
-    setHeatmapData(rateByDate);
+    setHeatmapData(scoreByDate);
   };
 
   const fetchTodayHabitStats = async () => {
@@ -101,13 +82,37 @@ export default function HabitsPage() {
     end: new Date() 
   });
 
+  const handleCreateHabit = async (habitData: any) => {
+    await addHabit(habitData);
+    await fetchHeatmapData();
+    await fetchTodayHabitStats();
+  };
+
   const handleLog = async (id: string, value: any) => {
     try {
+      // Optimistically update heatmap client state immediately for the selected date
+      setHeatmapData(prev => {
+        const next = { ...prev };
+        const total = habits.length || 1;
+        // Count how many of the OTHER habits are completed
+        const otherCompletedCount = entries
+          .filter(e => e.habit_id !== id)
+          .filter(e => e.completed)
+          .length;
+        const currentCompleted = value.completed ? 1 : 0;
+        const score = Math.round(((otherCompletedCount + currentCompleted) / total) * 100);
+        const clampedScore = Math.max(0, Math.min(100, score));
+        next[selectedDate] = clampedScore;
+        return next;
+      });
+
       await logHabit(id, value, selectedDate);
-      fetchHeatmapData();
+      await fetchHeatmapData();
       fetchTodayHabitStats();
     } catch (err) {
       console.error('Logging failed:', err);
+      // Restore valid state on failure
+      fetchHeatmapData();
     }
   };
 
@@ -329,7 +334,7 @@ export default function HabitsPage() {
       {isFormOpen && (
         <HabitForm
           onClose={() => setIsFormOpen(false)}
-          onSubmit={addHabit}
+          onSubmit={handleCreateHabit}
         />
       )}
     </div>
