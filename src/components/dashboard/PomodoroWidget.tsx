@@ -7,13 +7,18 @@ import { useAuth } from '../../hooks/useAuth';
 import { supabase } from '../../lib/supabase';
 
 interface TimerState {
-  startedAt: number;
+  startedAt: number | null;
   workSeconds: number;
   phase: 'work' | 'break';
   sessionId: string | null;
+  isActive: boolean;
 }
 
-export default function PomodoroWidget() {
+interface PomodoroWidgetProps {
+  onSessionComplete?: (minutes: number) => void;
+}
+
+export default function PomodoroWidget({ onSessionComplete }: PomodoroWidgetProps) {
   const [timeLeft, setTimeLeft] = useState(25 * 60);
   const [isActive, setIsActive] = useState(false);
   const [phase, setPhase] = useState<'work' | 'break'>('work');
@@ -23,21 +28,30 @@ export default function PomodoroWidget() {
 
   // Load / Sync with localStorage on mount
   useEffect(() => {
-    const saved = localStorage.getItem('focus_timer');
+    // Clean legacy focus_timer if present
+    localStorage.removeItem('focus_timer');
+
+    const saved = localStorage.getItem('focus_timer_state');
     if (saved) {
       try {
         const state: TimerState = JSON.parse(saved);
-        const elapsed = Math.floor((Date.now() - state.startedAt) / 1000);
-        const remaining = Math.max(0, state.workSeconds - elapsed);
+        setPhase(state.phase || 'work');
+        setCurrentSessionId(state.sessionId);
         
-        if (remaining > 0) {
-          setPhase(state.phase);
-          setCurrentSessionId(state.sessionId);
-          setTimeLeft(remaining);
-          setIsActive(true);
+        if (state.isActive && state.startedAt) {
+          const elapsed = Math.floor((Date.now() - state.startedAt) / 1000);
+          const remaining = Math.max(0, state.workSeconds - elapsed);
+          
+          if (remaining > 0) {
+            setTimeLeft(remaining);
+            setIsActive(true);
+          } else {
+            // Timer finished while user was away - auto complete
+            handleComplete(state.sessionId, state.workSeconds, state.phase || 'work', state.startedAt);
+          }
         } else {
-          // Timer finished while user was away - auto complete
-          handleComplete(state.sessionId, state.workSeconds, state.phase);
+          setTimeLeft(state.workSeconds);
+          setIsActive(false);
         }
       } catch (e) {
         console.error('Failed to resume focus timer', e);
@@ -45,48 +59,74 @@ export default function PomodoroWidget() {
     }
   }, []);
 
+  // Timer Countdown Ticks
   useEffect(() => {
     let interval: any = null;
     if (isActive && timeLeft > 0) {
       interval = setInterval(() => {
-        const saved = localStorage.getItem('focus_timer');
-        if (saved) {
-          const state: TimerState = JSON.parse(saved);
-          const elapsed = Math.floor((Date.now() - state.startedAt) / 1000);
-          const remaining = Math.max(0, state.workSeconds - elapsed);
-          setTimeLeft(remaining);
-          
-          if (remaining === 0) {
-             console.log('[Focus] Timer reached zero, auto-completing');
-             setIsActive(false);
-             handleComplete(state.sessionId, state.workSeconds, state.phase);
+        setTimeLeft((prev) => {
+          if (prev <= 1) {
+            clearInterval(interval);
+            setIsActive(false);
+            
+            // Fetch state from localStorage to find starting timestamp
+            const saved = localStorage.getItem('focus_timer_state');
+            let startedAtMs = Date.now() - (phase === 'break' ? 5 * 60 : 25 * 60) * 1000;
+            if (saved) {
+              try {
+                const s = JSON.parse(saved);
+                if (s.startedAt) startedAtMs = s.startedAt;
+              } catch (e) {}
+            }
+            
+            console.log('[Focus] Timer reached zero, auto-completing');
+            handleComplete(currentSessionId, phase === 'break' ? 5 * 60 : 25 * 60, phase, startedAtMs);
+            return 0;
           }
-        }
+          return prev - 1;
+        });
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [isActive, timeLeft]);
+  }, [isActive, phase, currentSessionId]);
 
-  const handleComplete = async (sessionId: string | null, totalSeconds: number, currentPhase: 'work' | 'break') => {
-    localStorage.removeItem('focus_timer');
+  const handleComplete = async (
+    sessionId: string | null,
+    totalSeconds: number,
+    currentPhase: 'work' | 'break',
+    startedAtMs?: number
+  ) => {
+    localStorage.removeItem('focus_timer_state');
     const durationMinutes = Math.round(totalSeconds / 60);
 
     console.log('[Focus] Completing session. Duration:', durationMinutes);
 
     try {
       if (user && currentPhase === 'work' && durationMinutes >= 1) {
+        const completedAtISO = new Date().toISOString();
+        const startedAtISO = startedAtMs 
+          ? new Date(startedAtMs).toISOString() 
+          : new Date(Date.now() - totalSeconds * 1000).toISOString();
+
         console.log('[Focus] User ID:', user?.id);
         const { data, error } = await supabase.from('focus_sessions').insert({
           user_id: user.id,
           duration_minutes: durationMinutes,
+          completed: true,
+          session_type: 'pomodoro',
+          started_at: startedAtISO,
+          completed_at: completedAtISO,
           title: 'Focus Session',
-          created_at: new Date().toISOString()
+          created_at: completedAtISO
         }).select();
         
         if (error) {
           console.error('[Focus] Failed to save focus session:', error);
         } else {
           console.log('[Focus] Focus session saved:', data);
+          if (onSessionComplete) {
+            onSessionComplete(durationMinutes);
+          }
         }
         refetchFocus();
       }
@@ -97,40 +137,50 @@ export default function PomodoroWidget() {
       setCurrentSessionId(null);
       const nextPhase = currentPhase === 'work' ? 'break' : 'work';
       setPhase(nextPhase);
-      setTimeLeft(nextPhase === 'break' ? 5 * 60 : 25 * 60);
+      const nextSeconds = nextPhase === 'break' ? 5 * 60 : 25 * 60;
+      setTimeLeft(nextSeconds);
     }
   };
 
   const toggleTimer = async () => {
     if (isActive) {
-      // Pause - calculate what was done so far and save? 
-      // The user instructions say: "Only save if at least 1 minute was focused"
-      // Let's implement the stopTimer as a complete stop for now as per instructions.
-      
-      const saved = localStorage.getItem('focus_timer');
+      // Pause - calculate what was completed so far
+      const saved = localStorage.getItem('focus_timer_state');
       if (saved) {
         const state: TimerState = JSON.parse(saved);
-        const elapsedSeconds = state.workSeconds - timeLeft;
-        if (elapsedSeconds >= 60 && phase === 'work') {
-          handleComplete(currentSessionId, elapsedSeconds, phase);
+        if (state.startedAt) {
+          const elapsedSeconds = state.workSeconds - timeLeft;
+          if (elapsedSeconds >= 60 && phase === 'work') {
+            handleComplete(currentSessionId, elapsedSeconds, phase, state.startedAt);
+          } else {
+            // Keep timeLeft where paused and persist in local storage
+            const pausedState: TimerState = {
+              startedAt: null,
+              workSeconds: timeLeft,
+              phase,
+              sessionId: currentSessionId,
+              isActive: false
+            };
+            localStorage.setItem('focus_timer_state', JSON.stringify(pausedState));
+            setIsActive(false);
+          }
         } else {
           setIsActive(false);
-          localStorage.removeItem('focus_timer');
         }
       } else {
         setIsActive(false);
       }
     } else {
-      const workMinutes = phase === 'break' ? 5 : 25;
-      
+      // Start/Resume timer
       const timerState: TimerState = {
         startedAt: Date.now(),
         workSeconds: timeLeft, 
         phase: phase,
-        sessionId: currentSessionId
+        sessionId: currentSessionId,
+        isActive: true
       };
       
-      localStorage.setItem('focus_timer', JSON.stringify(timerState));
+      localStorage.setItem('focus_timer_state', JSON.stringify(timerState));
       setIsActive(true);
     }
   };
@@ -140,7 +190,7 @@ export default function PomodoroWidget() {
     setPhase('work');
     setTimeLeft(25 * 60);
     setCurrentSessionId(null);
-    localStorage.removeItem('focus_timer');
+    localStorage.removeItem('focus_timer_state');
   };
 
   const formatTime = (seconds: number) => {

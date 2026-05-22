@@ -62,6 +62,10 @@ export interface FocusSession {
   distractions?: number;
   created_at: string;
   ended_at?: string;
+  completed?: boolean;
+  session_type?: string;
+  started_at?: string;
+  completed_at?: string;
 }
 
 export interface PomodoroSession {

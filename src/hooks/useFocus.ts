@@ -17,7 +17,7 @@ export const useFocus = () => {
         .from('focus_sessions')
         .select('*')
         .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+        .order('completed_at', { ascending: false });
 
       if (error) console.error('Error focus sessions:', error.message);
       else setSessions(data || []);
