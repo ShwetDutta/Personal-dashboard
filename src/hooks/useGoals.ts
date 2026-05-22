@@ -77,17 +77,38 @@ export const useGoals = () => {
     if (!user) return;
     try {
       await ensureProfile(user);
-      const { data, error } = await supabase
+      
+      const payload: any = {
+        goal_id: goalId,
+        user_id: user.id,
+        title: title || 'New Milestone',
+        completed: false
+      };
+
+      console.log('Attempting to insert milestone with user_id:', payload);
+      let result = await supabase
         .from('goal_milestones')
-        .insert([{
-          goal_id: goalId,
-          user_id: user.id,
-          title: title || 'New Milestone',
-          completed: false
-        }])
+        .insert([payload])
         .select();
 
-      if (error) throw error;
+      // If database throws a 'column does not exist' or schema-related error for user_id, 
+      // retry the insert without the user_id column.
+      if (result.error && (result.error.code === '42703' || result.error.message?.includes('user_id') || result.error.message?.includes('column'))) {
+        console.warn('Insertion with user_id failed (column probably doesn\'t exist). Retrying without user_id:', result.error);
+        const { user_id, ...payloadWithoutUserId } = payload;
+        result = await supabase
+          .from('goal_milestones')
+          .insert([payloadWithoutUserId])
+          .select();
+      }
+
+      const { data, error } = result;
+
+      if (error) {
+        console.error('Database error inserting milestone:', error.message);
+        throw error;
+      }
+
       if (data && data.length > 0) {
         setMilestones(prev => [...prev, data[0]]);
         // Also update goals list
