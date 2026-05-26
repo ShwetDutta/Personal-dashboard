@@ -81,9 +81,9 @@ export default function DashboardPage() {
 
       // Tasks stats
       const [totalTasksRes, weekTasksRes, inProgressRes] = await Promise.all([
-        supabase.from('tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('status', 'completed'),
-        supabase.from('tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('status', 'completed').gte('completed_at', subDays(new Date(), 7).toISOString()),
-        supabase.from('tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).neq('status', 'completed').is('archived', false)
+        supabase.from('tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('completed', true),
+        supabase.from('tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('completed', true).gte('completed_at', subDays(new Date(), 7).toISOString()),
+        supabase.from('tasks').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('completed', false)
       ]);
 
       setTotalDoneCount(totalTasksRes.count || 0);
@@ -102,7 +102,7 @@ export default function DashboardPage() {
 
       // Recent Activity
       const [recentTasks, recentFocus] = await Promise.all([
-        supabase.from('tasks').select('id, title, completed_at').eq('user_id', user.id).eq('status', 'completed').gte('completed_at', todayStart.toISOString()).order('completed_at', { ascending: false }).limit(4),
+        supabase.from('tasks').select('id, title, completed_at').eq('user_id', user.id).eq('completed', true).gte('completed_at', todayStart.toISOString()).order('completed_at', { ascending: false }).limit(4),
         supabase.from('focus_sessions').select('id, duration_minutes, created_at').eq('user_id', user.id).gte('created_at', todayStart.toISOString()).order('created_at', { ascending: false }).limit(4)
       ]);
 
